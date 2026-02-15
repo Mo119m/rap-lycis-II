@@ -77,8 +77,22 @@ _STRUCTURE_LINE_RE = re.compile(
 )
 
 
+# Speaker labels in collaborative tracks: "小老虎：别信这一套" → "别信这一套"
+# Matches patterns like "艺人名：" or "ArtistName:" at the start of a line.
+# We strip the label but keep the lyric content after it.
+_SPEAKER_LABEL_RE = re.compile(
+    r"^[\w\s\.\-]{1,20}[：:]\s*",
+    re.UNICODE,
+)
+
+
+def _strip_speaker_label(line: str) -> str:
+    """Remove speaker labels like '小老虎：' from the start of a line."""
+    return _SPEAKER_LABEL_RE.sub("", line)
+
+
 def _clean_text(text: str) -> str:
-    """Remove production credit lines and standalone structure markers from lyric text.
+    """Remove production credit lines, structure markers, and speaker labels.
 
     Keeps actual lyric lines, including lines that *mention* Verse/Hook inline
     (e.g., "我的verse比你强" is kept).
@@ -95,7 +109,10 @@ def _clean_text(text: str) -> str:
             continue
         if _STRUCTURE_LINE_RE.match(stripped):
             continue
-        cleaned.append(stripped)
+        # Strip speaker labels (e.g., "小老虎：" at line start)
+        stripped = _strip_speaker_label(stripped)
+        if stripped:
+            cleaned.append(stripped)
     return "\n".join(cleaned)
 
 

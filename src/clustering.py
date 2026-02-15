@@ -32,8 +32,15 @@ def run_kmeans(
     entity_matrix: pd.DataFrame,
     n_clusters: int = 6,
     random_state: int = 42,
+    normalize: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Run K-means on the entity matrix.
+
+    Parameters
+    ----------
+    normalize : If True, apply L2-normalization per artist before clustering.
+        This prevents artists with many more lyrics (and thus higher raw
+        entity counts) from dominating the clustering.
 
     Returns
     -------
@@ -41,13 +48,19 @@ def run_kmeans(
     centroids : DataFrame indexed by cluster name, columns = entities
     """
     from sklearn.cluster import KMeans
+    from sklearn.preprocessing import normalize as sklearn_normalize
 
     if entity_matrix.empty:
         return pd.DataFrame(), pd.DataFrame()
 
     n_clusters = min(n_clusters, len(entity_matrix))
+
+    matrix_values = entity_matrix.values.astype(float)
+    if normalize:
+        matrix_values = sklearn_normalize(matrix_values, norm="l2")
+
     kmeans = KMeans(n_clusters=n_clusters, random_state=random_state, n_init="auto")
-    clusters = kmeans.fit_predict(entity_matrix)
+    clusters = kmeans.fit_predict(matrix_values)
 
     assignments = pd.DataFrame({"artist": entity_matrix.index, "cluster": clusters})
     centroids = pd.DataFrame(
