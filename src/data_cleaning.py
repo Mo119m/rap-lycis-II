@@ -68,6 +68,9 @@ _CREDIT_LINE_PATTERNS: List[str] = [
 
 _CREDIT_LINE_RE = re.compile("|".join(_CREDIT_LINE_PATTERNS), re.IGNORECASE)
 
+# Copyright / legal disclaimers that got scraped with lyrics
+_COPYRIGHT_RE = re.compile(r"未经.*书面许可|未经.*权利人", re.UNICODE)
+
 # Structure markers that are not actual lyrics (standalone labels only)
 _STRUCTURE_LINE_RE = re.compile(
     r"^\s*[\[\(（【]*\s*"
@@ -108,6 +111,8 @@ def _clean_text(text: str) -> str:
         if _CREDIT_LINE_RE.match(stripped):
             continue
         if _STRUCTURE_LINE_RE.match(stripped):
+            continue
+        if _COPYRIGHT_RE.search(stripped):
             continue
         # Strip speaker labels (e.g., "小老虎：" at line start)
         stripped = _strip_speaker_label(stripped)
@@ -174,6 +179,17 @@ def clean_text(df: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
     return df
 
 
+def deduplicate(df: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
+    """Remove duplicate text chunks within the same artist."""
+    n_before = len(df)
+    df = df.drop_duplicates(subset=["artist", "text"]).copy()
+    n_after = len(df)
+    if verbose and n_before != n_after:
+        print(f"[CLEAN] Deduplicated: {n_before} → {n_after} rows "
+              f"(removed {n_before - n_after} same-artist duplicate chunks)")
+    return df
+
+
 def combine_by_artist(df: pd.DataFrame) -> pd.DataFrame:
     """Group all lyric chunks by artist into a single combined text."""
     artist_lyrics = (
@@ -195,6 +211,7 @@ def load_and_clean(
         print(f"[LOAD] Loaded {len(df)} rows, {df['artist'].nunique()} artists")
     df = clean_songs(df, verbose=verbose)
     df = clean_text(df, verbose=verbose)
+    df = deduplicate(df, verbose=verbose)
     if verbose:
         print(f"[CLEAN] Final: {len(df)} rows, {df['artist'].nunique()} artists, "
               f"{df['song_id'].nunique() if 'song_id' in df.columns else '?'} songs")
