@@ -143,6 +143,119 @@ def extract_entities(
     return entity_df
 
 
+def generate_entity_review(
+    entity_df: pd.DataFrame,
+    output_path: str = "configs/entity_review.csv",
+    top_n: int = 100,
+) -> Path:
+    """Generate a CSV for manual entity review.
+
+    Outputs one row per unique (entity, label) pair, sorted by frequency,
+    with an empty ``action`` column for the user to fill in:
+    - leave blank → keep as-is
+    - ``delete``  → remove this entity from the dataset
+    - a label name (e.g. ``CITY``) → relabel to that type
+
+    Parameters
+    ----------
+    entity_df : long-form entity DataFrame
+    output_path : where to write the review CSV
+    top_n : max entities per label (0 = all)
+    """
+    if entity_df.empty:
+        return Path(output_path)
+
+    parts = []
+    for label in entity_df["label"].value_counts().index:
+        sub = (
+            entity_df[entity_df["label"] == label]
+            .groupby("entity").size()
+            .reset_index(name="count")
+            .sort_values("count", ascending=False)
+        )
+        if top_n > 0:
+            sub = sub.head(top_n)
+        sub["label"] = label
+        parts.append(sub)
+
+    review = pd.concat(parts, ignore_index=True)[["entity", "label", "count", ]]
+    review["action"] = ""
+    review = review.sort_values(["label", "count"], ascending=[True, False]).reset_index(drop=True)
+
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    review.to_csv(out, index=False, encoding="utf-8-sig")
+    print(f"[REVIEW] Wrote {len(review)} entities to {out}")
+    print(f"[REVIEW] Fill the 'action' column: blank=keep, delete=remove, LABEL_NAME=relabel")
+    return out
+
+
+def apply_entity_corrections(
+    entity_df: pd.DataFrame,
+    review_path: str = "configs/entity_review.csv",
+    verbose: bool = True,
+) -> pd.DataFrame:
+    """Apply manual corrections from the review CSV to the entity DataFrame.
+
+    Returns a new DataFrame with deletions and relabels applied.
+    """
+    review_file = Path(review_path)
+    if not review_file.exists():
+        if verbose:
+            print(f"[REVIEW] No review file at {review_file}, skipping corrections")
+        return entity_df
+
+    review = pd.read_csv(review_file, encoding="utf-8-sig")
+    if "action" not in review.columns:
+        if verbose:
+            print(f"[REVIEW] Review file has no 'action' column, skipping")
+        return entity_df
+
+    # Build lookup: (entity, label) → action
+    corrections = {}
+    for _, r in review.iterrows():
+        raw = r.get("action", "")
+        if pd.isna(raw):
+            continue
+        action = str(raw).strip()
+        if action:
+            corrections[(str(r["entity"]).strip(), str(r["label"]).strip())] = action
+
+    if not corrections:
+        if verbose:
+            print(f"[REVIEW] No corrections found in {review_file}")
+        return entity_df
+
+    n_before = len(entity_df)
+    delete_count = 0
+    relabel_count = 0
+
+    # Apply corrections
+    mask_delete = pd.Series(False, index=entity_df.index)
+    new_labels = entity_df["label"].copy()
+
+    for (ent, label), action in corrections.items():
+        match = (entity_df["entity"] == ent) & (entity_df["label"] == label)
+        if action.lower() == "delete":
+            mask_delete |= match
+            delete_count += match.sum()
+        else:
+            # Treat action as a new label
+            new_labels[match] = action
+            relabel_count += match.sum()
+
+    entity_df = entity_df[~mask_delete].copy()
+    entity_df["label"] = new_labels[~mask_delete]
+
+    if verbose:
+        print(f"[REVIEW] Applied corrections from {review_file}")
+        print(f"  Deleted:   {delete_count} mentions")
+        print(f"  Relabeled: {relabel_count} mentions")
+        print(f"  Remaining: {len(entity_df)}/{n_before} mentions")
+
+    return entity_df.reset_index(drop=True)
+
+
 def entity_summary(entity_df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
     """Return top-N most frequent entities across all artists."""
     if entity_df.empty:
