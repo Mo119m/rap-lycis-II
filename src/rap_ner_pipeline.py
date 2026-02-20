@@ -31,6 +31,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="NER pipeline for Chinese rap lyrics")
     parser.add_argument("--input", default="lyrics_chunks_enriched.csv", help="Input CSV path")
     parser.add_argument("--output-dir", default="outputs", help="Directory to save outputs")
+    parser.add_argument("--model", default="zh_core_web_trf",
+                        help="spaCy model name (zh_core_web_trf or zh_core_web_lg)")
     parser.add_argument("--lexicon", default="configs/rap_lexicon_seed.jsonl",
                         help="EntityRuler patterns JSONL")
     parser.add_argument("--max-rows", type=int, default=0,
@@ -54,7 +56,7 @@ def main() -> None:
     artist_lyrics = combine_by_artist(df)
 
     # 2. NER
-    nlp = build_nlp(args.lexicon)
+    nlp = build_nlp(args.lexicon, model_name=args.model)
     entity_df = extract_entities(artist_lyrics, nlp, min_entity_len=args.min_entity_len)
 
     # 2.5 Normalize entity variants (space artifacts, case, suffixes, substrings)

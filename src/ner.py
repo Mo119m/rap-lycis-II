@@ -27,19 +27,31 @@ DEFAULT_STOP_LABELS: Set[str] = {
 }
 
 
-def build_nlp(lexicon_path: str = "configs/rap_lexicon_seed.jsonl") -> Language:
+def build_nlp(
+    lexicon_path: str = "configs/rap_lexicon_seed.jsonl",
+    model_name: str = "zh_core_web_trf",
+) -> Language:
     """Build a spaCy NLP pipeline with optional EntityRuler lexicon.
 
-    Tries to load zh_core_web_lg first; falls back to blank Chinese tokenizer.
-    Only keeps the NER-related components to save memory.
+    Parameters
+    ----------
+    lexicon_path : path to EntityRuler patterns JSONL
+    model_name : spaCy model to load. Supported:
+        - ``zh_core_web_trf``  (transformer, most accurate, needs torch)
+        - ``zh_core_web_lg``   (CNN, faster, no torch needed)
+        Falls back to blank Chinese tokenizer if the model is not installed.
     """
+    # Components to exclude vary by model architecture
+    _EXCLUDE_STAT = ["tagger", "parser", "lemmatizer", "attribute_ruler"]
+    _EXCLUDE_TRF = ["tagger", "parser", "lemmatizer", "attribute_ruler"]
+
+    exclude = _EXCLUDE_TRF if "trf" in model_name else _EXCLUDE_STAT
     try:
-        # Only load NER-relevant components; skip parser/tagger to save memory
-        nlp = spacy.load("zh_core_web_lg", exclude=["tagger", "parser", "lemmatizer",
-                                                      "attribute_ruler"])
-        print("[INFO] Loaded spaCy model: zh_core_web_lg (NER-only)")
+        nlp = spacy.load(model_name, exclude=exclude)
+        print(f"[INFO] Loaded spaCy model: {model_name}")
     except Exception:
-        print("[WARN] zh_core_web_lg not found; using blank Chinese pipeline + lexicon rules.")
+        print(f"[WARN] {model_name} not found; using blank Chinese pipeline + lexicon rules.")
+        print(f"[HINT] Install with: python -m spacy download {model_name}")
         nlp = spacy.blank("zh")
 
     # Add EntityRuler
