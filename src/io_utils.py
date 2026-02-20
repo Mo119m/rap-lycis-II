@@ -6,12 +6,14 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.clustering import EntityMatrix
+
 
 def save_outputs(
     output_dir: str | Path,
     artist_lyrics: pd.DataFrame,
     entity_df: pd.DataFrame,
-    entity_matrix: pd.DataFrame,
+    entity_matrix: EntityMatrix,
     assignments: pd.DataFrame,
     summaries: pd.DataFrame,
 ) -> Path:
@@ -24,7 +26,10 @@ def save_outputs(
 
     artist_lyrics.to_csv(output_dir / "artist_lyrics.csv", index=False)
     entity_df.to_csv(output_dir / "entities_long.csv", index=False)
-    entity_matrix.to_csv(output_dir / "bag_of_entities.csv")
+
+    # Save entity matrix in sparse format (npz + index CSVs)
+    if not entity_matrix.empty:
+        entity_matrix.save_npz(str(output_dir / "bag_of_entities"))
 
     if not assignments.empty:
         assignments.to_csv(output_dir / "artist_clusters.csv", index=False)
@@ -32,8 +37,9 @@ def save_outputs(
         summaries.to_csv(output_dir / "cluster_entity_summary.csv", index=False)
 
     print(f"[IO] Outputs saved to {output_dir}/")
-    for f in sorted(output_dir.glob("*.csv")):
-        size_kb = f.stat().st_size / 1024
-        print(f"  {f.name} ({size_kb:.1f} KB)")
+    for f in sorted(output_dir.iterdir()):
+        if f.is_file():
+            size_kb = f.stat().st_size / 1024
+            print(f"  {f.name} ({size_kb:.1f} KB)")
 
     return output_dir
