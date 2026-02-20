@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import gc
 import json
+import re
+import unicodedata
 from collections import Counter
 from pathlib import Path
-from typing import Iterable, List, Set
+from typing import Dict, Iterable, List, Set
 
 import pandas as pd
 import spacy
@@ -141,6 +143,284 @@ def extract_entities(
             label_counts = entity_df["label"].value_counts()
             print(f"[NER] Label distribution:\n{label_counts.to_string()}")
     return entity_df
+
+
+_CJK_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")
+_CHINESE_SUFFIXES = re.compile(r"(们|的|了|着|过|啊|呢|吧|呀|哦|嘛|啦)$")
+
+
+def _is_cjk(text: str) -> bool:
+    """True if the text is primarily CJK characters."""
+    cjk_count = len(_CJK_RE.findall(text))
+    return cjk_count > len(text) * 0.5
+
+
+def _normalize_key(text: str) -> str:
+    """Produce a matching key: lowercase, strip CJK-internal spaces."""
+    # Remove spaces between CJK characters (tokenization artifacts like "长 沙")
+    result = re.sub(
+        r"([\u4e00-\u9fff\u3400-\u4dbf])\s+([\u4e00-\u9fff\u3400-\u4dbf])",
+        r"\1\2",
+        text,
+    )
+    # Apply repeatedly for chains like "说 唱 歌 手"
+    while re.search(r"([\u4e00-\u9fff\u3400-\u4dbf])\s+([\u4e00-\u9fff\u3400-\u4dbf])", result):
+        result = re.sub(
+            r"([\u4e00-\u9fff\u3400-\u4dbf])\s+([\u4e00-\u9fff\u3400-\u4dbf])",
+            r"\1\2",
+            result,
+        )
+    return result.lower().strip()
+
+
+def normalize_entities(
+    entity_df: pd.DataFrame,
+    verbose: bool = True,
+) -> pd.DataFrame:
+    """Normalize entity text to merge trivial variants.
+
+    Three-pass normalization:
+
+    1. **Space & case**: collapse CJK-internal spaces ("长 沙" → "长沙"),
+       case-fold English ("God"/"god" → "god"), merge English space-artifacts
+       when the no-space form exists ("re al" → "real").
+    2. **Chinese suffix stripping**: "老子们" → "老子" if the base form already
+       exists in the dataset with the same label.
+    3. **Substring containment**: "奥运会" → "奥运" if the shorter form exists
+       with the same label and is more frequent.
+    """
+    if entity_df.empty:
+        return entity_df
+
+    # -- Build frequency table per (entity, label) --
+    freq: Counter = Counter()
+    for ent, label in zip(entity_df["entity"], entity_df["label"]):
+        freq[(ent, label)] += 1
+
+    # -- Pass 1: space + case normalization --
+    # Group entities that share the same normalized key + label
+    key_to_entities: Dict[tuple, List[str]] = {}
+    for (ent, label) in freq:
+        key = (_normalize_key(ent), label)
+        key_to_entities.setdefault(key, []).append(ent)
+
+    mapping: Dict[tuple, str] = {}  # (old_entity, label) → canonical_entity
+    for (norm_key, label), forms in key_to_entities.items():
+        if len(forms) <= 1:
+            continue
+        # Pick the most frequent form as canonical
+        canonical = max(forms, key=lambda f: freq[(f, label)])
+        for form in forms:
+            if form != canonical:
+                mapping[(form, label)] = canonical
+
+    # Also handle pure English space artifacts: "re al" → "real"
+    # by checking if removing ALL spaces produces an existing entity
+    for (ent, label), count in list(freq.items()):
+        if " " in ent and not _is_cjk(ent):
+            no_space = ent.replace(" ", "")
+            # Check if the no-space version (case-insensitive) exists
+            for (other_ent, other_label) in freq:
+                if other_label == label and other_ent.lower() == no_space.lower() and other_ent != ent:
+                    if (ent, label) not in mapping:
+                        mapping[(ent, label)] = other_ent
+                    break
+
+    # -- Pass 2: Chinese suffix stripping --
+    # After pass 1, rebuild frequency with merged forms
+    freq2: Counter = Counter()
+    for (ent, label), count in freq.items():
+        canonical = mapping.get((ent, label), ent)
+        freq2[(canonical, label)] += count
+
+    existing = set(freq2.keys())
+    for (ent, label) in list(existing):
+        if _is_cjk(ent) and len(ent) >= 3:
+            stripped = _CHINESE_SUFFIXES.sub("", ent)
+            if stripped != ent and (stripped, label) in existing:
+                if (ent, label) not in mapping:
+                    mapping[(ent, label)] = stripped
+
+    # -- Pass 3: substring containment (same label) --
+    # Rebuild frequency again with suffix merges applied
+    freq3: Counter = Counter()
+    for (ent, label), count in freq.items():
+        canonical = mapping.get((ent, label), ent)
+        freq3[(canonical, label)] += count
+
+    by_label: Dict[str, List[tuple]] = {}
+    for (ent, label), count in freq3.items():
+        by_label.setdefault(label, []).append((ent, count))
+
+    for label, entries in by_label.items():
+        # Sort by frequency descending, then length ascending
+        entries.sort(key=lambda x: (-x[1], len(x[0])))
+        # For each entity, check if a more frequent entity is a substring
+        canonicals = []  # (entity, count) pairs that are already canonical
+        for ent, count in entries:
+            merged = False
+            for canon, canon_count in canonicals:
+                # Only merge if one strictly contains the other
+                if len(ent) != len(canon) and (canon in ent or ent in canon):
+                    shorter = canon if len(canon) < len(ent) else ent
+                    longer = ent if shorter == canon else canon
+                    # Merge longer → shorter (keep the more concise form)
+                    if shorter == canon:
+                        # ent is longer, merge ent → canon
+                        mapping[(ent, label)] = canon
+                    else:
+                        # canon is longer, merge canon → ent
+                        mapping[(canon, label)] = ent
+                    merged = True
+                    break
+            if not merged:
+                canonicals.append((ent, count))
+
+    # -- Apply mapping --
+    if not mapping:
+        if verbose:
+            print("[NORM] No entities to normalize")
+        return entity_df
+
+    new_entities = entity_df["entity"].copy()
+    labels = entity_df["label"]
+    merge_count = 0
+    for i in range(len(entity_df)):
+        key = (new_entities.iloc[i], labels.iloc[i])
+        if key in mapping:
+            new_entities.iloc[i] = mapping[key]
+            merge_count += 1
+
+    result = entity_df.copy()
+    result["entity"] = new_entities
+
+    if verbose:
+        print(f"[NORM] Normalized {merge_count} mentions across {len(mapping)} entity variants")
+        # Show the merges
+        shown = 0
+        for (old, label), new in sorted(mapping.items(), key=lambda x: -freq.get(x[0], 0)):
+            print(f"  \"{old}\" → \"{new}\" [{label}]")
+            shown += 1
+            if shown >= 20:
+                remaining = len(mapping) - shown
+                if remaining > 0:
+                    print(f"  ... and {remaining} more")
+                break
+
+    return result
+
+
+def generate_entity_review(
+    entity_df: pd.DataFrame,
+    output_path: str = "configs/entity_review.csv",
+    top_n: int = 100,
+) -> Path:
+    """Generate a CSV for manual entity review.
+
+    Outputs one row per unique (entity, label) pair, sorted by frequency,
+    with an empty ``action`` column for the user to fill in:
+    - leave blank → keep as-is
+    - ``delete``  → remove this entity from the dataset
+    - a label name (e.g. ``CITY``) → relabel to that type
+
+    Parameters
+    ----------
+    entity_df : long-form entity DataFrame
+    output_path : where to write the review CSV
+    top_n : max entities per label (0 = all)
+    """
+    if entity_df.empty:
+        return Path(output_path)
+
+    parts = []
+    for label in entity_df["label"].value_counts().index:
+        sub = (
+            entity_df[entity_df["label"] == label]
+            .groupby("entity").size()
+            .reset_index(name="count")
+            .sort_values("count", ascending=False)
+        )
+        if top_n > 0:
+            sub = sub.head(top_n)
+        sub["label"] = label
+        parts.append(sub)
+
+    review = pd.concat(parts, ignore_index=True)[["entity", "label", "count", ]]
+    review["action"] = ""
+    review = review.sort_values(["label", "count"], ascending=[True, False]).reset_index(drop=True)
+
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    review.to_csv(out, index=False, encoding="utf-8-sig")
+    print(f"[REVIEW] Wrote {len(review)} entities to {out}")
+    print(f"[REVIEW] Fill the 'action' column: blank=keep, delete=remove, LABEL_NAME=relabel")
+    return out
+
+
+def apply_entity_corrections(
+    entity_df: pd.DataFrame,
+    review_path: str = "configs/entity_review.csv",
+    verbose: bool = True,
+) -> pd.DataFrame:
+    """Apply manual corrections from the review CSV to the entity DataFrame.
+
+    Returns a new DataFrame with deletions and relabels applied.
+    """
+    review_file = Path(review_path)
+    if not review_file.exists():
+        if verbose:
+            print(f"[REVIEW] No review file at {review_file}, skipping corrections")
+        return entity_df
+
+    review = pd.read_csv(review_file, encoding="utf-8-sig")
+    if "action" not in review.columns:
+        if verbose:
+            print(f"[REVIEW] Review file has no 'action' column, skipping")
+        return entity_df
+
+    # Build lookup: (entity, label) → action
+    corrections = {}
+    for _, r in review.iterrows():
+        raw = r.get("action", "")
+        if pd.isna(raw):
+            continue
+        action = str(raw).strip()
+        if action:
+            corrections[(str(r["entity"]).strip(), str(r["label"]).strip())] = action
+
+    if not corrections:
+        if verbose:
+            print(f"[REVIEW] No corrections found in {review_file}")
+        return entity_df
+
+    n_before = len(entity_df)
+    delete_count = 0
+    relabel_count = 0
+
+    # Apply corrections
+    mask_delete = pd.Series(False, index=entity_df.index)
+    new_labels = entity_df["label"].copy()
+
+    for (ent, label), action in corrections.items():
+        match = (entity_df["entity"] == ent) & (entity_df["label"] == label)
+        if action.lower() == "delete":
+            mask_delete |= match
+            delete_count += match.sum()
+        else:
+            # Treat action as a new label
+            new_labels[match] = action
+            relabel_count += match.sum()
+
+    entity_df = entity_df[~mask_delete].copy()
+    entity_df["label"] = new_labels[~mask_delete]
+
+    if verbose:
+        print(f"[REVIEW] Applied corrections from {review_file}")
+        print(f"  Deleted:   {delete_count} mentions")
+        print(f"  Relabeled: {relabel_count} mentions")
+        print(f"  Remaining: {len(entity_df)}/{n_before} mentions")
+
+    return entity_df.reset_index(drop=True)
 
 
 def entity_summary(entity_df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:

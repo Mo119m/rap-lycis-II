@@ -22,7 +22,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from src.data_cleaning import load_and_clean, combine_by_artist
-from src.ner import build_nlp, extract_entities, entity_summary
+from src.ner import build_nlp, extract_entities, normalize_entities, entity_summary, apply_entity_corrections
 from src.clustering import build_bag_of_entities, run_kmeans, summarize_clusters
 from src.io_utils import save_outputs
 
@@ -41,6 +41,8 @@ def parse_args() -> argparse.Namespace:
                         help="Top entities to show per cluster")
     parser.add_argument("--n-clusters", type=int, default=6, help="K in k-means")
     parser.add_argument("--random-state", type=int, default=42, help="Random seed")
+    parser.add_argument("--entity-review", default="configs/entity_review.csv",
+                        help="Entity review CSV for manual corrections")
     return parser.parse_args()
 
 
@@ -54,6 +56,12 @@ def main() -> None:
     # 2. NER
     nlp = build_nlp(args.lexicon)
     entity_df = extract_entities(artist_lyrics, nlp, min_entity_len=args.min_entity_len)
+
+    # 2.5 Normalize entity variants (space artifacts, case, suffixes, substrings)
+    entity_df = normalize_entities(entity_df)
+
+    # 2.6 Apply manual entity corrections (if review file exists)
+    entity_df = apply_entity_corrections(entity_df, review_path=args.entity_review)
 
     # 3. Clustering
     entity_matrix = build_bag_of_entities(entity_df)
