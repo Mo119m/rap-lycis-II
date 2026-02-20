@@ -8,6 +8,7 @@ Handles:
 
 from __future__ import annotations
 
+import gc
 import json
 from collections import Counter
 from pathlib import Path
@@ -126,8 +127,12 @@ def extract_entities(
                 if ent.label_ in stop_labels:
                     continue
                 rows.append({"artist": artist, "entity": text, "label": ent.label_})
-        if verbose and (idx + 1) % 20 == 0:
-            print(f"  [NER] Processed {idx + 1}/{total} artists...")
+            del doc
+        # Periodically free accumulated memory
+        if (idx + 1) % 20 == 0:
+            gc.collect()
+            if verbose:
+                print(f"  [NER] Processed {idx + 1}/{total} artists...")
 
     entity_df = pd.DataFrame(rows)
     if verbose:
