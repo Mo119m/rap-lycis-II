@@ -28,10 +28,13 @@ def build_nlp(lexicon_path: str = "configs/rap_lexicon_seed.jsonl") -> Language:
     """Build a spaCy NLP pipeline with optional EntityRuler lexicon.
 
     Tries to load zh_core_web_lg first; falls back to blank Chinese tokenizer.
+    Only keeps the NER-related components to save memory.
     """
     try:
-        nlp = spacy.load("zh_core_web_lg")
-        print("[INFO] Loaded spaCy model: zh_core_web_lg")
+        # Only load NER-relevant components; skip parser/tagger to save memory
+        nlp = spacy.load("zh_core_web_lg", exclude=["tagger", "parser", "lemmatizer",
+                                                      "attribute_ruler"])
+        print("[INFO] Loaded spaCy model: zh_core_web_lg (NER-only)")
     except Exception:
         print("[WARN] zh_core_web_lg not found; using blank Chinese pipeline + lexicon rules.")
         nlp = spacy.blank("zh")
@@ -60,6 +63,29 @@ def build_nlp(lexicon_path: str = "configs/rap_lexicon_seed.jsonl") -> Language:
     return nlp
 
 
+_CHUNK_SIZE = 5000  # characters per chunk fed to spaCy
+
+
+def _split_text(text: str, chunk_size: int = _CHUNK_SIZE) -> List[str]:
+    """Split text into chunks at newline boundaries to avoid cutting mid-sentence."""
+    if len(text) <= chunk_size:
+        return [text]
+    chunks: List[str] = []
+    current: List[str] = []
+    current_len = 0
+    for line in text.split("\n"):
+        line_len = len(line) + 1  # +1 for the newline
+        if current_len + line_len > chunk_size and current:
+            chunks.append("\n".join(current))
+            current = []
+            current_len = 0
+        current.append(line)
+        current_len += line_len
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+
 def extract_entities(
     artist_lyrics: pd.DataFrame,
     nlp: Language,
@@ -68,6 +94,9 @@ def extract_entities(
     verbose: bool = True,
 ) -> pd.DataFrame:
     """Run NER on artist-grouped lyrics and return a long-form entity DataFrame.
+
+    Text is processed in small chunks (~5000 chars) to avoid OOM crashes
+    when using large spaCy models like zh_core_web_lg.
 
     Parameters
     ----------
@@ -87,15 +116,17 @@ def extract_entities(
 
     for idx, (_, row) in enumerate(artist_lyrics.iterrows()):
         artist = row["artist"]
-        doc = nlp(row["combined_text"])
-        for ent in doc.ents:
-            text = ent.text.strip()
-            if len(text) < min_entity_len:
-                continue
-            if ent.label_ in stop_labels:
-                continue
-            rows.append({"artist": artist, "entity": text, "label": ent.label_})
-        if verbose and (idx + 1) % 50 == 0:
+        chunks = _split_text(row["combined_text"])
+        for chunk in chunks:
+            doc = nlp(chunk)
+            for ent in doc.ents:
+                text = ent.text.strip()
+                if len(text) < min_entity_len:
+                    continue
+                if ent.label_ in stop_labels:
+                    continue
+                rows.append({"artist": artist, "entity": text, "label": ent.label_})
+        if verbose and (idx + 1) % 20 == 0:
             print(f"  [NER] Processed {idx + 1}/{total} artists...")
 
     entity_df = pd.DataFrame(rows)
