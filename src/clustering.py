@@ -117,7 +117,7 @@ def run_kmeans(
     assignments : DataFrame with columns ['artist', 'cluster']
     centroids : DataFrame indexed by cluster name, columns = entities
     """
-    from sklearn.cluster import KMeans
+    from sklearn.cluster import MiniBatchKMeans
     from sklearn.preprocessing import normalize as sklearn_normalize
 
     if entity_matrix.empty:
@@ -125,11 +125,13 @@ def run_kmeans(
 
     n_clusters = min(n_clusters, len(entity_matrix))
 
-    mat = entity_matrix.data.astype(np.float64)
+    mat = entity_matrix.data.astype(np.float32)
     if normalize:
         mat = sklearn_normalize(mat, norm="l2")
 
-    kmeans = KMeans(n_clusters=n_clusters, random_state=random_state, n_init="auto")
+    kmeans = MiniBatchKMeans(
+        n_clusters=n_clusters, random_state=random_state, batch_size=64
+    )
     clusters = kmeans.fit_predict(mat)
 
     assignments = pd.DataFrame({
