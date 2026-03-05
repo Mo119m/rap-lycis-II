@@ -372,11 +372,19 @@ def generate_entity_review(
 def apply_entity_corrections(
     entity_df: pd.DataFrame,
     review_path: str = "configs/entity_review.csv",
+    min_count: int = 0,
     verbose: bool = True,
 ) -> pd.DataFrame:
     """Apply manual corrections from the review CSV to the entity DataFrame.
 
-    Returns a new DataFrame with deletions and relabels applied.
+    Parameters
+    ----------
+    entity_df : long-form entity DataFrame
+    review_path : path to the review CSV with 'action' column
+    min_count : auto-delete entities that (a) are NOT mentioned in the review
+        file AND (b) appear fewer than *min_count* times across all artists.
+        Set to 0 to disable (default).
+    verbose : print summary
     """
     review_file = Path(review_path)
     if not review_file.exists():
@@ -392,18 +400,16 @@ def apply_entity_corrections(
 
     # Build lookup: (entity, label) → action
     corrections = {}
+    reviewed_entities: Set[tuple] = set()
     for _, r in review.iterrows():
+        ent_key = (str(r["entity"]).strip(), str(r["label"]).strip())
+        reviewed_entities.add(ent_key)
         raw = r.get("action", "")
         if pd.isna(raw):
             continue
         action = str(raw).strip()
         if action:
-            corrections[(str(r["entity"]).strip(), str(r["label"]).strip())] = action
-
-    if not corrections:
-        if verbose:
-            print(f"[REVIEW] No corrections found in {review_file}")
-        return entity_df
+            corrections[ent_key] = action
 
     n_before = len(entity_df)
     delete_count = 0
@@ -423,14 +429,30 @@ def apply_entity_corrections(
             new_labels[match] = action
             relabel_count += match.sum()
 
+    # Auto-delete low-frequency entities not covered by the review
+    auto_delete_count = 0
+    if min_count > 0:
+        freq = entity_df.groupby(["entity", "label"]).size().reset_index(name="_freq")
+        low_freq_pairs = set()
+        for _, row in freq.iterrows():
+            pair = (row["entity"], row["label"])
+            if pair not in reviewed_entities and row["_freq"] < min_count:
+                low_freq_pairs.add(pair)
+        if low_freq_pairs:
+            for pair in low_freq_pairs:
+                match = (entity_df["entity"] == pair[0]) & (entity_df["label"] == pair[1])
+                mask_delete |= match
+                auto_delete_count += match.sum()
+
     entity_df = entity_df[~mask_delete].copy()
     entity_df["label"] = new_labels[~mask_delete]
 
     if verbose:
         print(f"[REVIEW] Applied corrections from {review_file}")
-        print(f"  Deleted:   {delete_count} mentions")
-        print(f"  Relabeled: {relabel_count} mentions")
-        print(f"  Remaining: {len(entity_df)}/{n_before} mentions")
+        print(f"  Deleted (manual):  {delete_count} mentions")
+        print(f"  Deleted (min_count<{min_count}): {auto_delete_count} mentions")
+        print(f"  Relabeled:         {relabel_count} mentions")
+        print(f"  Remaining:         {len(entity_df)}/{n_before} mentions")
 
     return entity_df.reset_index(drop=True)
 

@@ -45,6 +45,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--random-state", type=int, default=42, help="Random seed")
     parser.add_argument("--entity-review", default="configs/entity_review.csv",
                         help="Entity review CSV for manual corrections")
+    parser.add_argument("--min-count", type=int, default=2,
+                        help="Auto-delete entities not in review with count < N (0=disable)")
     return parser.parse_args()
 
 
@@ -63,7 +65,8 @@ def main() -> None:
     entity_df = normalize_entities(entity_df)
 
     # 2.6 Apply manual entity corrections (if review file exists)
-    entity_df = apply_entity_corrections(entity_df, review_path=args.entity_review)
+    entity_df = apply_entity_corrections(entity_df, review_path=args.entity_review,
+                                          min_count=args.min_count)
 
     # 3. Clustering
     entity_matrix = build_bag_of_entities(entity_df)
