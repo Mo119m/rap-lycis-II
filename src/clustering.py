@@ -138,23 +138,27 @@ def run_kmeans(
         "artist": entity_matrix.artists,
         "cluster": clusters,
     })
-    centroids = pd.DataFrame(
-        kmeans.cluster_centers_,
-        columns=entity_matrix.entities,
-        index=[f"cluster_{i}" for i in range(n_clusters)],
-    )
-    return assignments, centroids
+    return assignments, kmeans.cluster_centers_
 
 
-def summarize_clusters(centroids: pd.DataFrame, top_k: int = 25) -> pd.DataFrame:
-    """Extract top-k entities per cluster ranked by centroid weight."""
+def summarize_clusters(
+    centers: np.ndarray, entities: List[str], top_k: int = 25
+) -> pd.DataFrame:
+    """Extract top-k entities per cluster ranked by centroid weight.
+
+    Parameters
+    ----------
+    centers : numpy array of shape (n_clusters, n_entities)
+    entities : list of entity names matching columns of centers
+    top_k : number of top entities per cluster
+    """
     summaries = []
-    for cluster_name, values in centroids.iterrows():
-        top_entities = values.sort_values(ascending=False).head(top_k)
-        for entity, score in top_entities.items():
+    for i, row in enumerate(centers):
+        top_idx = np.argsort(row)[::-1][:top_k]
+        for j in top_idx:
             summaries.append({
-                "cluster": cluster_name,
-                "entity": entity,
-                "centroid_weight": round(float(score), 4),
+                "cluster": f"cluster_{i}",
+                "entity": entities[j],
+                "centroid_weight": round(float(row[j]), 4),
             })
     return pd.DataFrame(summaries)
