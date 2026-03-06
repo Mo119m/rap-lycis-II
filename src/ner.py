@@ -326,6 +326,7 @@ def generate_entity_review(
     entity_df: pd.DataFrame,
     output_path: str = "configs/entity_review.csv",
     top_n: int = 100,
+    global_min_count: int = 0,
 ) -> Path:
     """Generate a CSV for manual entity review.
 
@@ -335,33 +336,80 @@ def generate_entity_review(
     - ``delete``  → remove this entity from the dataset
     - a label name (e.g. ``CITY``) → relabel to that type
 
+    If the output file already exists, previously reviewed rows (with a
+    non-empty ``action`` column) are preserved.  Only **new** entities are
+    appended so that earlier manual work is never lost.
+
     Parameters
     ----------
     entity_df : long-form entity DataFrame
     output_path : where to write the review CSV
     top_n : max entities per label (0 = all)
+    global_min_count : also include any entity whose global frequency is
+        >= this value, even if it didn't make the per-label top_n.
+        Set to 0 to disable (default).
     """
     if entity_df.empty:
         return Path(output_path)
 
+    # --- build per-label top-n ---
+    freq = (
+        entity_df.groupby(["entity", "label"]).size()
+        .reset_index(name="count")
+    )
+
     parts = []
     for label in entity_df["label"].value_counts().index:
         sub = (
-            entity_df[entity_df["label"] == label]
-            .groupby("entity").size()
-            .reset_index(name="count")
+            freq[freq["label"] == label]
             .sort_values("count", ascending=False)
         )
         if top_n > 0:
             sub = sub.head(top_n)
-        sub["label"] = label
         parts.append(sub)
 
-    review = pd.concat(parts, ignore_index=True)[["entity", "label", "count", ]]
+    review = pd.concat(parts, ignore_index=True)
+
+    # --- add global high-frequency entities not already selected ---
+    if global_min_count > 0:
+        already = set(zip(review["entity"], review["label"]))
+        global_high = freq[freq["count"] >= global_min_count]
+        extra = global_high[
+            ~global_high.apply(lambda r: (r["entity"], r["label"]) in already, axis=1)
+        ]
+        if len(extra):
+            review = pd.concat([review, extra], ignore_index=True)
+            print(f"[REVIEW] Added {len(extra)} extra entities with global count >= {global_min_count}")
+
+    review = review[["entity", "label", "count"]].copy()
     review["action"] = ""
     review = review.sort_values(["label", "count"], ascending=[True, False]).reset_index(drop=True)
 
+    # --- merge with existing review file to preserve previous work ---
     out = Path(output_path)
+    if out.exists():
+        existing = pd.read_csv(out, encoding="utf-8-sig")
+        if "action" in existing.columns:
+            old_actions = {
+                (str(r["entity"]).strip(), str(r["label"]).strip()): str(r["action"]).strip()
+                for _, r in existing.iterrows()
+                if pd.notna(r.get("action")) and str(r["action"]).strip()
+            }
+            old_keys = set(
+                (str(r["entity"]).strip(), str(r["label"]).strip())
+                for _, r in existing.iterrows()
+            )
+            # restore previously filled actions
+            review["action"] = review.apply(
+                lambda r: old_actions.get((r["entity"], r["label"]), ""), axis=1
+            )
+            new_keys = set(zip(review["entity"], review["label"]))
+            n_new = len(new_keys - old_keys)
+            if n_new:
+                print(f"[REVIEW] {n_new} new entities added to existing review file")
+            else:
+                print(f"[REVIEW] No new entities to add")
+
     out.parent.mkdir(parents=True, exist_ok=True)
     review.to_csv(out, index=False, encoding="utf-8-sig")
     print(f"[REVIEW] Wrote {len(review)} entities to {out}")

@@ -47,6 +47,9 @@ def parse_args() -> argparse.Namespace:
                         help="Entity review CSV for manual corrections")
     parser.add_argument("--min-count", type=int, default=2,
                         help="Auto-delete entities not in review with count < N (0=disable)")
+    parser.add_argument("--global-min-count", type=int, default=0,
+                        help="Also include entities with global freq >= N in review, "
+                             "even if not in per-label top_n (0=disable)")
     return parser.parse_args()
 
 
