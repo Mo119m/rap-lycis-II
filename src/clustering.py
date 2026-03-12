@@ -117,7 +117,7 @@ def run_kmeans(
     assignments : DataFrame with columns ['artist', 'cluster']
     centroids : DataFrame indexed by cluster name, columns = entities
     """
-    from sklearn.cluster import KMeans
+    from sklearn.cluster import MiniBatchKMeans
     from sklearn.preprocessing import normalize as sklearn_normalize
 
     if entity_matrix.empty:
@@ -125,34 +125,40 @@ def run_kmeans(
 
     n_clusters = min(n_clusters, len(entity_matrix))
 
-    mat = entity_matrix.data.astype(np.float64)
+    mat = entity_matrix.data.astype(np.float32)
     if normalize:
         mat = sklearn_normalize(mat, norm="l2")
 
-    kmeans = KMeans(n_clusters=n_clusters, random_state=random_state, n_init="auto")
+    kmeans = MiniBatchKMeans(
+        n_clusters=n_clusters, random_state=random_state, batch_size=64
+    )
     clusters = kmeans.fit_predict(mat)
 
     assignments = pd.DataFrame({
         "artist": entity_matrix.artists,
         "cluster": clusters,
     })
-    centroids = pd.DataFrame(
-        kmeans.cluster_centers_,
-        columns=entity_matrix.entities,
-        index=[f"cluster_{i}" for i in range(n_clusters)],
-    )
-    return assignments, centroids
+    return assignments, kmeans.cluster_centers_
 
 
-def summarize_clusters(centroids: pd.DataFrame, top_k: int = 25) -> pd.DataFrame:
-    """Extract top-k entities per cluster ranked by centroid weight."""
+def summarize_clusters(
+    centers: np.ndarray, entities: List[str], top_k: int = 25
+) -> pd.DataFrame:
+    """Extract top-k entities per cluster ranked by centroid weight.
+
+    Parameters
+    ----------
+    centers : numpy array of shape (n_clusters, n_entities)
+    entities : list of entity names matching columns of centers
+    top_k : number of top entities per cluster
+    """
     summaries = []
-    for cluster_name, values in centroids.iterrows():
-        top_entities = values.sort_values(ascending=False).head(top_k)
-        for entity, score in top_entities.items():
+    for i, row in enumerate(centers):
+        top_idx = np.argsort(row)[::-1][:top_k]
+        for j in top_idx:
             summaries.append({
-                "cluster": cluster_name,
-                "entity": entity,
-                "centroid_weight": round(float(score), 4),
+                "cluster": f"cluster_{i}",
+                "entity": entities[j],
+                "centroid_weight": round(float(row[j]), 4),
             })
     return pd.DataFrame(summaries)

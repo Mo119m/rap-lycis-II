@@ -27,19 +27,31 @@ DEFAULT_STOP_LABELS: Set[str] = {
 }
 
 
-def build_nlp(lexicon_path: str = "configs/rap_lexicon_seed.jsonl") -> Language:
+def build_nlp(
+    lexicon_path: str = "configs/rap_lexicon_seed.jsonl",
+    model_name: str = "zh_core_web_trf",
+) -> Language:
     """Build a spaCy NLP pipeline with optional EntityRuler lexicon.
 
-    Tries to load zh_core_web_lg first; falls back to blank Chinese tokenizer.
-    Only keeps the NER-related components to save memory.
+    Parameters
+    ----------
+    lexicon_path : path to EntityRuler patterns JSONL
+    model_name : spaCy model to load. Supported:
+        - ``zh_core_web_trf``  (transformer, most accurate, needs torch)
+        - ``zh_core_web_lg``   (CNN, faster, no torch needed)
+        Falls back to blank Chinese tokenizer if the model is not installed.
     """
+    # Components to exclude vary by model architecture
+    _EXCLUDE_STAT = ["tagger", "parser", "lemmatizer", "attribute_ruler"]
+    _EXCLUDE_TRF = ["tagger", "parser", "lemmatizer", "attribute_ruler"]
+
+    exclude = _EXCLUDE_TRF if "trf" in model_name else _EXCLUDE_STAT
     try:
-        # Only load NER-relevant components; skip parser/tagger to save memory
-        nlp = spacy.load("zh_core_web_lg", exclude=["tagger", "parser", "lemmatizer",
-                                                      "attribute_ruler"])
-        print("[INFO] Loaded spaCy model: zh_core_web_lg (NER-only)")
+        nlp = spacy.load(model_name, exclude=exclude)
+        print(f"[INFO] Loaded spaCy model: {model_name}")
     except Exception:
-        print("[WARN] zh_core_web_lg not found; using blank Chinese pipeline + lexicon rules.")
+        print(f"[WARN] {model_name} not found; using blank Chinese pipeline + lexicon rules.")
+        print(f"[HINT] Install with: python -m spacy download {model_name}")
         nlp = spacy.blank("zh")
 
     # Add EntityRuler
@@ -314,6 +326,7 @@ def generate_entity_review(
     entity_df: pd.DataFrame,
     output_path: str = "configs/entity_review.csv",
     top_n: int = 100,
+    global_min_count: int = 0,
 ) -> Path:
     """Generate a CSV for manual entity review.
 
@@ -323,33 +336,80 @@ def generate_entity_review(
     - ``delete``  → remove this entity from the dataset
     - a label name (e.g. ``CITY``) → relabel to that type
 
+    If the output file already exists, previously reviewed rows (with a
+    non-empty ``action`` column) are preserved.  Only **new** entities are
+    appended so that earlier manual work is never lost.
+
     Parameters
     ----------
     entity_df : long-form entity DataFrame
     output_path : where to write the review CSV
     top_n : max entities per label (0 = all)
+    global_min_count : also include any entity whose global frequency is
+        >= this value, even if it didn't make the per-label top_n.
+        Set to 0 to disable (default).
     """
     if entity_df.empty:
         return Path(output_path)
 
+    # --- build per-label top-n ---
+    freq = (
+        entity_df.groupby(["entity", "label"]).size()
+        .reset_index(name="count")
+    )
+
     parts = []
     for label in entity_df["label"].value_counts().index:
         sub = (
-            entity_df[entity_df["label"] == label]
-            .groupby("entity").size()
-            .reset_index(name="count")
+            freq[freq["label"] == label]
             .sort_values("count", ascending=False)
         )
         if top_n > 0:
             sub = sub.head(top_n)
-        sub["label"] = label
         parts.append(sub)
 
-    review = pd.concat(parts, ignore_index=True)[["entity", "label", "count", ]]
+    review = pd.concat(parts, ignore_index=True)
+
+    # --- add global high-frequency entities not already selected ---
+    if global_min_count > 0:
+        already = set(zip(review["entity"], review["label"]))
+        global_high = freq[freq["count"] >= global_min_count]
+        extra = global_high[
+            ~global_high.apply(lambda r: (r["entity"], r["label"]) in already, axis=1)
+        ]
+        if len(extra):
+            review = pd.concat([review, extra], ignore_index=True)
+            print(f"[REVIEW] Added {len(extra)} extra entities with global count >= {global_min_count}")
+
+    review = review[["entity", "label", "count"]].copy()
     review["action"] = ""
     review = review.sort_values(["label", "count"], ascending=[True, False]).reset_index(drop=True)
 
+    # --- merge with existing review file to preserve previous work ---
     out = Path(output_path)
+    if out.exists():
+        existing = pd.read_csv(out, encoding="utf-8-sig")
+        if "action" in existing.columns:
+            old_actions = {
+                (str(r["entity"]).strip(), str(r["label"]).strip()): str(r["action"]).strip()
+                for _, r in existing.iterrows()
+                if pd.notna(r.get("action")) and str(r["action"]).strip()
+            }
+            old_keys = set(
+                (str(r["entity"]).strip(), str(r["label"]).strip())
+                for _, r in existing.iterrows()
+            )
+            # restore previously filled actions
+            review["action"] = review.apply(
+                lambda r: old_actions.get((r["entity"], r["label"]), ""), axis=1
+            )
+            new_keys = set(zip(review["entity"], review["label"]))
+            n_new = len(new_keys - old_keys)
+            if n_new:
+                print(f"[REVIEW] {n_new} new entities added to existing review file")
+            else:
+                print(f"[REVIEW] No new entities to add")
+
     out.parent.mkdir(parents=True, exist_ok=True)
     review.to_csv(out, index=False, encoding="utf-8-sig")
     print(f"[REVIEW] Wrote {len(review)} entities to {out}")
@@ -360,11 +420,19 @@ def generate_entity_review(
 def apply_entity_corrections(
     entity_df: pd.DataFrame,
     review_path: str = "configs/entity_review.csv",
+    min_count: int = 0,
     verbose: bool = True,
 ) -> pd.DataFrame:
     """Apply manual corrections from the review CSV to the entity DataFrame.
 
-    Returns a new DataFrame with deletions and relabels applied.
+    Parameters
+    ----------
+    entity_df : long-form entity DataFrame
+    review_path : path to the review CSV with 'action' column
+    min_count : auto-delete entities that (a) are NOT mentioned in the review
+        file AND (b) appear fewer than *min_count* times across all artists.
+        Set to 0 to disable (default).
+    verbose : print summary
     """
     review_file = Path(review_path)
     if not review_file.exists():
@@ -380,18 +448,16 @@ def apply_entity_corrections(
 
     # Build lookup: (entity, label) → action
     corrections = {}
+    reviewed_entities: Set[tuple] = set()
     for _, r in review.iterrows():
+        ent_key = (str(r["entity"]).strip(), str(r["label"]).strip())
+        reviewed_entities.add(ent_key)
         raw = r.get("action", "")
         if pd.isna(raw):
             continue
         action = str(raw).strip()
         if action:
-            corrections[(str(r["entity"]).strip(), str(r["label"]).strip())] = action
-
-    if not corrections:
-        if verbose:
-            print(f"[REVIEW] No corrections found in {review_file}")
-        return entity_df
+            corrections[ent_key] = action
 
     n_before = len(entity_df)
     delete_count = 0
@@ -411,14 +477,30 @@ def apply_entity_corrections(
             new_labels[match] = action
             relabel_count += match.sum()
 
+    # Auto-delete low-frequency entities not covered by the review
+    auto_delete_count = 0
+    if min_count > 0:
+        freq = entity_df.groupby(["entity", "label"]).size().reset_index(name="_freq")
+        low_freq_pairs = set()
+        for _, row in freq.iterrows():
+            pair = (row["entity"], row["label"])
+            if pair not in reviewed_entities and row["_freq"] < min_count:
+                low_freq_pairs.add(pair)
+        if low_freq_pairs:
+            for pair in low_freq_pairs:
+                match = (entity_df["entity"] == pair[0]) & (entity_df["label"] == pair[1])
+                mask_delete |= match
+                auto_delete_count += match.sum()
+
     entity_df = entity_df[~mask_delete].copy()
     entity_df["label"] = new_labels[~mask_delete]
 
     if verbose:
         print(f"[REVIEW] Applied corrections from {review_file}")
-        print(f"  Deleted:   {delete_count} mentions")
-        print(f"  Relabeled: {relabel_count} mentions")
-        print(f"  Remaining: {len(entity_df)}/{n_before} mentions")
+        print(f"  Deleted (manual):  {delete_count} mentions")
+        print(f"  Deleted (min_count<{min_count}): {auto_delete_count} mentions")
+        print(f"  Relabeled:         {relabel_count} mentions")
+        print(f"  Remaining:         {len(entity_df)}/{n_before} mentions")
 
     return entity_df.reset_index(drop=True)
 
