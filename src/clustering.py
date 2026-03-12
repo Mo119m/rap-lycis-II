@@ -70,17 +70,32 @@ class EntityMatrix:
         return cls(data, artists, entities)
 
 
-def build_bag_of_entities(entity_df: pd.DataFrame) -> EntityMatrix:
+def build_bag_of_entities(entity_df: pd.DataFrame, min_entity_freq: int = 3) -> EntityMatrix:
     """Build a sparse artist × entity frequency matrix from long-form entity data.
 
     Uses scipy CSR format — memory-efficient for the typical 99%+ sparsity
-    in lyrics NER data. A 241 × 21k matrix at 99.1% sparsity uses ~200KB
-    instead of ~40MB dense.
+    in lyrics NER data.
+
+    Parameters
+    ----------
+    min_entity_freq : drop entities that appear fewer than this many times
+        across all artists.  Reduces dimensionality and memory usage.
+        Set to 0 to keep all entities.
     """
     if entity_df.empty:
         return EntityMatrix(csr_matrix((0, 0)), [], [])
 
     counts = entity_df.groupby(["artist", "entity"]).size().reset_index(name="count")
+
+    # Drop low-frequency entities to reduce dimensions
+    if min_entity_freq > 0:
+        entity_totals = counts.groupby("entity")["count"].sum()
+        keep = entity_totals[entity_totals >= min_entity_freq].index
+        n_before = counts["entity"].nunique()
+        counts = counts[counts["entity"].isin(keep)]
+        n_after = counts["entity"].nunique()
+        if n_before != n_after:
+            print(f"[BOE] Filtered entities: {n_before} → {n_after} (dropped {n_before - n_after} with freq < {min_entity_freq})")
 
     # Encode artists and entities as integer indices
     artist_cat = pd.Categorical(counts["artist"])
