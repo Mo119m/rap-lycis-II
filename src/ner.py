@@ -472,6 +472,8 @@ def apply_entity_corrections(
         if action.lower() == "delete":
             mask_delete |= match
             delete_count += match.sum()
+        elif action.lower() == "keep":
+            pass  # explicitly keep as-is, no relabel
         else:
             # Treat action as a new label
             new_labels[match] = action
