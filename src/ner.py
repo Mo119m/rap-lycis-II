@@ -129,9 +129,13 @@ def extract_entities(
     rows: List[dict] = []
     total = len(artist_lyrics)
 
+    if verbose:
+        print(f"[NER] Starting extraction for {total} artists...")
+
     for idx, (_, row) in enumerate(artist_lyrics.iterrows()):
         artist = row["artist"]
         chunks = _split_text(row["combined_text"])
+        n_ents_before = len(rows)
         for chunk in chunks:
             doc = nlp(chunk)
             for ent in doc.ents:
@@ -142,11 +146,12 @@ def extract_entities(
                     continue
                 rows.append({"artist": artist, "entity": text, "label": ent.label_})
             del doc
+        if verbose:
+            found = len(rows) - n_ents_before
+            print(f"  [NER] {idx + 1}/{total}  {artist}  (+{found} entities, {len(rows)} total)")
         # Periodically free accumulated memory
         if (idx + 1) % 20 == 0:
             gc.collect()
-            if verbose:
-                print(f"  [NER] Processed {idx + 1}/{total} artists...")
 
     entity_df = pd.DataFrame(rows)
     if verbose:
